@@ -5,6 +5,7 @@ import time
 
 from flask import current_app, request
 
+## convert imports from relative to absolute
 from ..conf.config import Config
 from ..controller.interceptors import json_required
 from ..exceptions import ErrorResponse, FlaskStateError
@@ -25,117 +26,7 @@ from ..utils.logger import DefaultLogger, logger
 from .response_methods import make_response_content
 
 
-def init_app(app, interval=60, log_instance=None):
-    """
-    Plugin entry
-    :param app: Flask app
-    :param interval:
-    :param log_instance: custom logger object
-    """
-    logger.set(log_instance or DefaultLogger())
-    app.add_url_rule(
-        "/v0/state/hoststatus",
-        endpoint="state_host_status",
-        view_func=query_flask_state,
-        methods=[HttpMethod.POST.value],
-    )
-    init_db(app)
-    init_redis(app)
-    model_init_app(app)
-
-    if not isinstance(interval, int):
-        raise TypeError(
-            ErrorMsg.DATA_TYPE_ERROR.get_msg(
-                ".The target type is {}, not {}".format(int.__name__, type(interval).__name__)
-            )
-        )
-
-    # Timing recorder
-    t_host = threading.Thread(
-        target=record_timer,
-        args=(
-            app,
-            interval,
-        ),
-    )
-    t_host.setDaemon(True)
-    t_host.start()
-
-    t_io = threading.Thread(
-        target=record_io_timer,
-        args=(app, 10),
-    )
-    t_io.setDaemon(True)
-    t_io.start()
-
-
-def init_redis(app):
-    redis_state = app.config.get("REDIS_CONF", {})
-
-    if not redis_state.get("REDIS_STATUS"):
-        return
-
-    redis_conf_keys = ["REDIS_HOST", "REDIS_PORT", "REDIS_PASSWORD"]
-    redis_conf = {key: value for key, value in redis_state.items() if key in redis_conf_keys}
-
-    redis_conn.set_redis(redis_conf)
-
-
-def init_db(app):
-    if not app.config.get("SQLALCHEMY_BINDS", {}).get(Config.DEFAULT_BIND_SQLITE):
-        raise KeyError(ErrorMsg.LACK_SQLITE.get_msg())
-    app.config["SQLALCHEMY_BINDS"][Config.DEFAULT_BIND_SQLITE] = format_address(
-        app.config["SQLALCHEMY_BINDS"].get(Config.DEFAULT_BIND_SQLITE)
-    )
-
-
-def record_timer(app, interval):
-    app.lock_flask_state = Lock.get_file_lock("host")
-    with app.app_context():
-        try:
-            current_app.lock_flask_state.acquire()
-            logger.info(InfoMsg.ACQUIRED_LOCK.get_msg(". process ID: %d" % os.getpid()))
-
-            s = sched.scheduler(time.time, time.sleep)
-            in_time = time.time()
-            target_time = int(int((time.time()) / 60 + 1) * 60)
-            time.sleep(60 - in_time % 60)
-            record_flask_state_host(interval, target_time)
-            while True:
-                target_time += interval
-                now_time = time.time()
-                s.enter(target_time - now_time, 1, record_flask_state_host, (interval, target_time))
-                s.run()
-        except BlockingIOError:
-            pass
-        except Exception as e:
-            current_app.lock_flask_state.release()
-            raise e
-
-
-def record_io_timer(app, interval):
-    app.io_lock_flask_state = Lock.get_file_lock("io")
-    with app.app_context():
-        try:
-            current_app.io_lock_flask_state.acquire()
-
-            s = sched.scheduler(time.time, time.sleep)
-            in_time = time.time()
-            target_time = int(int((time.time()) / 60 + 1) * 60)
-            time.sleep(60 - in_time % 60)
-            record_flask_state_io_host(interval, target_time)
-            while True:
-                target_time += interval
-                now_time = time.time()
-                s.enter(target_time - now_time, 1, record_flask_state_io_host, (interval, target_time))
-                s.run()
-        except BlockingIOError:
-            pass
-        except Exception as e:
-            current_app.lock_flask_state.release()
-            raise e
-
-
+# should this be in a view module instead?
 @auth_user
 @auth_method
 @json_required
@@ -153,4 +44,107 @@ def query_flask_state():
         return make_response_content(e, http_status=e.status_code)
     except Exception as e:
         logger.exception(e)
-        return make_response_content(ErrorResponse(MsgCode.UNKNOWN_ERROR), http_status=HTTPStatus.INTERNAL_SERVER_ERROR)
+        error_response = ErrorResponse(MsgCode.UNKNOWN_ERROR)
+        http_status = HTTPStatus.INTERNAL_SERVER_ERROR
+        return make_response_content(error_response, http_status=http_status)
+
+
+# consider extracting this logic into its own module and break into functions
+def record_timer(app, function, interval, lock_group, lock_key, priority=1)
+    app.locks[lock_group][lock_key] = Lock.get_file_lock(lock_key)
+
+    with app.app_context():
+        try:
+            current_app.locks[lock_group][lock_key].acquire()
+            scheduler = sched.scheduler(time.time, time.sleep)
+
+            event = {
+                "action": function,
+                "priority": priority,
+                "kwargs": {
+                    "interval": interval,
+                    "target_time": round(time.time()) / 60 + 1) * 60)
+                }
+            }
+
+            time.sleep(10)
+            action(interval, target_time)
+            while True:
+                event["kwargs"]["target_time"] += interval
+                event["delay"] = target_time - time.time()
+                scheduler.enter(**event)
+                scheduler.run()
+
+        except BlockingIOError:
+            pass
+        except Exception as e:
+            current_app.lock_flask_state.release()
+            raise e
+
+
+def init_url_rules(app)
+    app.add_url_rule(
+        "/v0/state/hoststatus",
+        endpoint="state_host_status",
+        view_func=query_flask_state,
+        methods=[HttpMethod.POST.value],
+    )
+
+def init_db(app):
+    try:
+        sqlalchemy_binds = app.config["SQLALCHEMY_BINDS"]
+        sqlite_binds = sqlalchemy_binds[Config.DEFAULT_BIND_SQLITE]
+        sqlalchemy_binds[Config.DEFAULT_BIND_SQLITE] = format_address(sqlite_binds)
+    except KeyError as e:
+        # Raise a custom exception here i.e => raise SqliteBindingMissing from e
+        raise e(ErrorMsg.LACK_SQLITE.get_msg())
+
+def init_redis(app):
+    state = app.config.get("REDIS_CONF", {})
+    if state.get("REDIS_STATUS"):
+        keys = ["REDIS_HOST", "REDIS_PORT", "REDIS_PASSWORD"]
+        config = {k: v for k, v in state.items() if k in keys}
+        redis_conn.set_redis(redis_conf)
+
+def init_recorder_threads(app, interval)
+    lock_group = "record_flask_state"
+    app.locks = {lock_group: {}}
+    target_kwargs = {"app": app, "lock_group": lock_group}
+
+    threads = {}
+    threads["host"] = threading.Thread(
+        target=record_timer,
+        kwargs={
+            "function": record_flask_state_host,
+            "interval": interval,
+            **target_kwargs
+        }
+    )
+    threads["io"] = threading.Thread(
+        target=record_timer,
+        kwargs={
+            "function": record_flask_state_io_host,
+            "interval": 10,
+            **target_kwargs
+        }
+    )
+
+    return threads
+
+def init_app(app, interval=60, custom_logger=None):
+    logger.set(custom_logger or DefaultLogger())
+
+    if not isinstance(interval, int):
+        ## use custom exceptions and inherit from TypeError instead
+        error_template = ErrorMsg.DATA_TYPE_ERROR.get_msg
+        raise TypeError(error_template.format(int.__name__, type(interval).__name__)
+
+    init_url_rules(app)
+    init_db(app)
+    init_redis(app)
+    model_init_app(app)
+
+    recorder_threads = init_recorder_threads(app)
+    for thread in recorder_threads.values():
+        thread.setDaemon(True)
+        thread.start()
